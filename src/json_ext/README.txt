@@ -26,4 +26,4 @@ SELECT json_get('{"key": "val", "arr": ["v0", "v1"]}', 'key');
 SELECT json_get('{"key": "val", "arr": ["v0", "v1"]}', 'arr', 0);
 > v0
 
-This extension uses cJSON library to parse JSON
+This extension uses JsonGet library to parse JSON

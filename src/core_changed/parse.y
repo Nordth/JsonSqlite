@@ -246,7 +246,7 @@ id(A) ::= INDEXED(X).    {A = X;}
 %left CONCAT.
 %left COLLATE.
 %right BITNOT.
-%left JSONGET.
+%right JSONGET.
 
 // And "ids" is an identifer-or-string.
 //

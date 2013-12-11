@@ -16,8 +16,6 @@
 
 #include <assert.h>
 
-#include <math.h>
-
 #ifndef SQLITE_CORE
   #include "sqlite3ext.h"
   SQLITE_EXTENSION_INIT1
@@ -25,50 +23,84 @@
   #include "sqlite3.h"
 #endif
 
-#define FLOAT_EPSILON 0.00000001
-#include "cJSON.h"
+#include "jsonget.h"
 
+static void sqlitejsonDestructor(void *p)
+{
+  sqlite3_free(p);
+}
+
+
+#define SQLITEJSON_STATIC_STRING_BUFFER_SIZE 512
 
 /*
 **  Select one of sqlite3_result_* function to store json_obj value
 */
-static void writeJsonValToContext(
+static void sqlitejsonWriteJsonValToContext(
   sqlite3_context *context,
-  cJSON* json_obj
+  JsonGetCursor json_obj
 ){ 
-  if (json_obj)
-  {
-    switch (json_obj->type)
+    switch (json_obj.type)
     {
-      case cJSON_False:
-        sqlite3_result_int(context, 0);
-        break;
-      case cJSON_True:
-        sqlite3_result_int(context, 1);
-        break;
-      case cJSON_NULL:
-        sqlite3_result_null(context);
-        break;
-      case cJSON_Number:
-        if (fabs(json_obj->valuedouble - json_obj->valueint) < FLOAT_EPSILON)
-          sqlite3_result_int(context, json_obj->valueint);
-        else
-          sqlite3_result_double(context, json_obj->valuedouble);
-        break;
-      case cJSON_String:
-        sqlite3_result_text(context, json_obj->valuestring, -1, SQLITE_TRANSIENT);
-        break;
-      case cJSON_Array:
-      case cJSON_Object:
+      case JSONGET_BOOLEAN:
+      case JSONGET_INTEGER:
       {
-        char *selected_json = cJSON_PrintUnformatted(json_obj);
-        sqlite3_result_text(context, selected_json, -1, SQLITE_TRANSIENT);
-        sqlite3_free(selected_json);
+        int val = 0;
+        jsonget_int(json_obj, &val);
+        sqlite3_result_int(context, val);
         break;
       }
-    }
-  }
-  else sqlite3_result_null(context);
+      case JSONGET_NULL:
+        sqlite3_result_null(context);
+        break;
+      case JSONGET_DOUBLE:
+      {
+        double val = 0;
+        jsonget_double(json_obj, &val);
+        sqlite3_result_double(context, val);
+        break;
+      }
+      case JSONGET_STRING:
+      {
+        char static_buffer[SQLITEJSON_STATIC_STRING_BUFFER_SIZE];
+        char *buf = static_buffer;
+        int real_len;
+        sqlite3_destructor_type destruct = SQLITE_TRANSIENT;
+        // In the first time, try read string to stack
+        if (jsonget_string(json_obj, buf, sizeof(static_buffer), &real_len))
+        {
+          if (real_len >= sizeof(static_buffer))
+          {
+            buf = sqlite3_malloc(real_len + 1);
+            // read to heap
+            jsonget_string(json_obj, buf, real_len + 1, &real_len);
+            destruct = sqlitejsonDestructor;
+          }
+          sqlite3_result_text(context, buf, -1, destruct);
+        }
+        else sqlite3_result_null(context);
+        break;
+      }
+      case JSONGET_ARRAY:
+      case JSONGET_OBJECT:
+      {
+        const char *buf;
+        int len, i;
+        char* mem;
+        if (jsonget_raw(json_obj, &buf, &len))
+        {
+          mem = sqlite3_malloc(len + 1);
+          for(i = 0; i < len; i++) mem[i] = *buf++;
+          mem[i] = 0;
+          sqlite3_result_text(context, mem, len + 1, sqlitejsonDestructor);                
+        }
+        else sqlite3_result_null(context);
+        break;
+      }
+      default:
+        sqlite3_result_null(context);
+        break;
+  }  
 }
 
 /*
@@ -78,7 +110,7 @@ static void writeJsonValToContext(
 **   key - path of retrieving key
 **         'kobj', 'kobj1->kobj2', 'karray->1->kobj'
 */
-static void jsonGetFunc(
+static void sqlitejsonGetFunc(
   sqlite3_context *context, 
   int argc, 
   sqlite3_value **argv
@@ -87,43 +119,30 @@ static void jsonGetFunc(
   {
     sqlite3_result_error(context, "Invalid number of arguments", -1);
   }
+  else if (sqlite3_value_type(argv[0]) == SQLITE_NULL) sqlite3_result_null(context);
   else
   {
-    const unsigned char *json = sqlite3_value_text(argv[0]);
-    cJSON *json_obj, *json_root;
-    int i;
-    json_root = cJSON_Parse(json);
-    json_obj = json_root;
-    for (i = 1; i < argc && json_obj; i++)
-    {
-      if (sqlite3_value_type(argv[i]) == SQLITE_INTEGER)
+      const char *json = (char*)sqlite3_value_text(argv[0]);
+      JsonGetCursor json_obj, json_root;
+      int i;
+      json_root = jsonget(json);
+      json_obj = json_root;
+      for (i = 1; i < argc && json_obj.type != JSONGET_INVALID; i++)
       {
-        int index = sqlite3_value_int(argv[i]);
-        json_obj = cJSON_GetArrayItem(json_obj, index);
+        if (sqlite3_value_type(argv[i]) == SQLITE_INTEGER)
+        {
+          int index = sqlite3_value_int(argv[i]);
+          json_obj = jsonget_move_index(json_obj, index);
+        }
+        else
+        {
+          const char *key = (char*)sqlite3_value_text(argv[i]);
+          json_obj = jsonget_move_key(json_obj, key);
+        }
       }
-      else
-      {
-        const unsigned char *key = sqlite3_value_text(argv[i]);
-        json_obj = cJSON_GetObjectItem(json_obj, key);
-      }
-    }
-    if (i != argc) sqlite3_result_null(context);
-    else writeJsonValToContext(context, json_obj);
-    cJSON_Delete(json_root);
+      if (i != argc) sqlite3_result_null(context);
+      else sqlitejsonWriteJsonValToContext(context, json_obj);
   }
-}
-
-// Malloc and free hooks for cJSON
-static cJSON_Hooks cJsonHooks;
-
-static void *memAlloc(size_t len)
-{
-    return sqlite3_malloc(len);
-}
-
-static void memFree(void *pointer)
-{
-    sqlite3_free(pointer);
 }
 
 /*
@@ -137,7 +156,7 @@ int sqlite3JsonInit(sqlite3 *db){
     void *pContext;                           /* sqlite3_user_data() context */
     void (*xFunc)(sqlite3_context*,int,sqlite3_value**);
   } scalars[] = {
-    {"json_get",   -1, SQLITE_ANY,         0, jsonGetFunc},
+    {"json_get",   -1, SQLITE_ANY,         0, sqlitejsonGetFunc},
   };
 
   int rc = SQLITE_OK;
@@ -149,11 +168,6 @@ int sqlite3JsonInit(sqlite3 *db){
         db, p->zName, p->nArg, p->enc, p->pContext, p->xFunc, 0, 0
     );
   }
-
-  // Init cJSON
-  cJsonHooks.malloc_fn = memAlloc;
-  cJsonHooks.free_fn = memFree;
-  cJSON_InitHooks(&cJsonHooks);
 
   return rc;
 }

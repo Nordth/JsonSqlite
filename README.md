@@ -2,14 +2,34 @@
 
 Modified version of sqlite library provides additional capabilities to work with json data
 
-Retrieving json values with -> operator
-=======================================
+__Features:__
 
-SELECT '{"key": "val", "arr": ["v0", "v1"]}'->key; // SAME AS ->'key'
+* New "->" operator to get values from json
+* Efficient work with json data
+
+
+## Example 1: Select value from key
+
+```sql
+SELECT '{"key": "val", "arr": ["v0", "v1"]}'->key;
 > val
-SELECT '{"key": "val", "arr": ["v0", "v1"]}'->arr->0;
-> v0
+```
 
+## Example 2: Sum values from json
+
+Table Bill:
+
+| id | bill                          | ... |
+| --:|-------------------------------| --- |
+| 1  | {"items": [], "total": 400}   | ... |
+| 2  | {"items": [], "total": 1200}  | ... |
+| 3  | {"items": [], "total": 100}   | ... |
+
+
+```sql
+SELECT SUM(bill->total) FROM Bill;
+> 1700
+```
 
 ## Unlicense
 
